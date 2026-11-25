@@ -36,10 +36,55 @@ final class SourceImportFile: @unchecked Sendable {
 
 @MainActor
 final class SourceLibraryModel: ObservableObject {
-    @Published private(set) var sources: [BookSource] = []
+    struct SourceSummary: Identifiable, Hashable, Sendable {
+        let id: String
+        let name: String
+        let url: String
+        let subtitle: String
+        let enabled: Bool
+        let enabledExplore: Bool
+        let groups: [String]
+        let weight: Int
+        let lastUpdateTime: Int64
+        let respondTime: Int64
+        let customOrder: Int
+        fileprivate let searchableName: String
+        fileprivate let searchableURL: String
+        fileprivate let searchableGroups: [String]
+
+        init(source: BookSource) {
+            let parsedGroups = source.groups
+            id = source.id
+            name = source.bookSourceName
+            url = source.bookSourceUrl
+            subtitle = parsedGroups.isEmpty
+                ? (URL(string: source.bookSourceUrl)?.host ?? source.bookSourceUrl)
+                : parsedGroups.joined(separator: " · ")
+            enabled = source.enabled
+            enabledExplore = source.enabledExplore
+            groups = parsedGroups
+            weight = source.weight
+            lastUpdateTime = source.lastUpdateTime
+            respondTime = source.respondTime
+            customOrder = source.customOrder
+            searchableName = source.bookSourceName.lowercased()
+            searchableURL = source.bookSourceUrl.lowercased()
+            searchableGroups = parsedGroups.map { $0.lowercased() }
+        }
+    }
+
+    @Published private(set) var sources: [BookSource] = [] {
+        didSet { rebuildDerivedState() }
+    }
     @Published private(set) var isWorking = false
     @Published var notice: Notice?
     @Published var pendingImport: PendingImport?
+    private(set) var sourcesVersion = 0
+    private(set) var groups: [String] = []
+    private(set) var groupCounts: [String: Int] = [:]
+    private(set) var enabledCount = 0
+    private(set) var summaries: [SourceSummary] = []
+    private var sourcesByID: [String: BookSource] = [:]
 
     struct PendingImport: Identifiable, Sendable {
         struct Item: Identifiable, Sendable {
@@ -84,8 +129,92 @@ final class SourceLibraryModel: ObservableObject {
     private var saveGeneration = 0
     private var persistedSources: [BookSource] = []
 
-    var groups: [String] {
-        Array(Set(sources.flatMap(\.groups))).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    func source(id: String) -> BookSource? {
+        sourcesByID[id]
+    }
+
+    private func rebuildDerivedState() {
+        sourcesVersion &+= 1
+        var byID: [String: BookSource] = Dictionary(minimumCapacity: sources.count)
+        var counts: [String: Int] = [:]
+        var nextSummaries: [SourceSummary] = []
+        nextSummaries.reserveCapacity(sources.count)
+        var nextEnabledCount = 0
+        for source in sources {
+            byID[source.id] = source
+            if source.enabled { nextEnabledCount += 1 }
+            let summary = SourceSummary(source: source)
+            for group in summary.groups {
+                counts[group, default: 0] += 1
+            }
+            nextSummaries.append(summary)
+        }
+        sourcesByID = byID
+        enabledCount = nextEnabledCount
+        groupCounts = counts
+        groups = counts.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        summaries = nextSummaries
+    }
+
+    nonisolated static func filterSummaries(
+        _ summaries: [SourceSummary],
+        selectedGroup: String?,
+        searchText: String,
+        sortMode: String,
+        descending: Bool
+    ) -> [SourceSummary] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedGroup = selectedGroup?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = summaries.filter { summary in
+            let matchesGroup: Bool
+            if let normalizedGroup {
+                matchesGroup = normalizedGroup.isEmpty
+                    ? summary.groups.isEmpty
+                    : summary.groups.contains(normalizedGroup)
+            } else {
+                matchesGroup = true
+            }
+            guard matchesGroup else { return false }
+            guard !query.isEmpty else { return true }
+            return summary.searchableName.contains(query)
+                || summary.searchableURL.contains(query)
+                || summary.searchableGroups.contains(where: { $0.contains(query) })
+        }
+        guard sortMode != "manual" else { return filtered }
+        return filtered.sorted { lhs, rhs in
+            descending ? isOrdered(rhs, before: lhs, sortMode: sortMode) : isOrdered(lhs, before: rhs, sortMode: sortMode)
+        }
+    }
+
+    private nonisolated static func isOrdered(
+        _ lhs: SourceSummary,
+        before rhs: SourceSummary,
+        sortMode: String
+    ) -> Bool {
+        switch sortMode {
+        case "weight":
+            return lhs.weight == rhs.weight
+                ? lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+                : lhs.weight < rhs.weight
+        case "name":
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        case "url":
+            return lhs.url.localizedStandardCompare(rhs.url) == .orderedAscending
+        case "update":
+            return lhs.lastUpdateTime == rhs.lastUpdateTime
+                ? lhs.name < rhs.name
+                : lhs.lastUpdateTime > rhs.lastUpdateTime
+        case "respond":
+            return lhs.respondTime == rhs.respondTime
+                ? lhs.name < rhs.name
+                : lhs.respondTime < rhs.respondTime
+        case "enabled":
+            return lhs.enabled == rhs.enabled
+                ? lhs.name < rhs.name
+                : lhs.enabled && !rhs.enabled
+        default:
+            return lhs.customOrder < rhs.customOrder
+        }
     }
 
     init(repository: any BookSourceRepository, importTransport: any HTTPTransport = URLSessionHTTPTransport.shared) {
