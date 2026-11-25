@@ -541,6 +541,9 @@ private struct SourceGroupContentsView: View {
     @EnvironmentObject private var library: SourceLibraryModel
     let group: String
     @State private var activeDetailSource: BookSource?
+    @State private var isSelecting = false
+    @State private var selectedSourceIDs = Set<String>()
+    @State private var confirmsBatchDelete = false
 
     private var summaries: [SourceLibraryModel.SourceSummary] {
         library.summaries.filter { $0.groups.contains(group) }
@@ -550,15 +553,33 @@ private struct SourceGroupContentsView: View {
         List {
             Section {
                 ForEach(summaries) { summary in
-                    SourceRow(
-                        summary: summary,
-                        onSelect: {
-                            activeDetailSource = library.source(id: summary.id)
-                        },
-                        onEnabledChanged: { enabled in
-                            Task { await library.setEnabled(enabled, for: summary.id) }
+                    if isSelecting {
+                        Button {
+                            if !selectedSourceIDs.insert(summary.id).inserted { selectedSourceIDs.remove(summary.id) }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: selectedSourceIDs.contains(summary.id) ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .foregroundStyle(selectedSourceIDs.contains(summary.id) ? ReadingTheme.accent : .secondary)
+                                SourceRow(summary: summary, showsToggle: false, onSelect: nil) { _ in }
+                            }
                         }
-                    )
+                        .buttonStyle(.plain)
+                    } else {
+                        SourceRow(
+                            summary: summary,
+                            onSelect: {
+                                activeDetailSource = library.source(id: summary.id)
+                            },
+                            onEnabledChanged: { enabled in
+                                Task { await library.setEnabled(enabled, for: summary.id) }
+                            }
+                        )
+                    }
+                }
+                .onDelete { offsets in
+                    let ids = Set(offsets.compactMap { summaries.indices.contains($0) ? summaries[$0].id : nil })
+                    Task { await library.remove(sourceIDs: ids) }
                 }
                 if summaries.isEmpty {
                     Text("该分组暂无书源")
@@ -571,8 +592,58 @@ private struct SourceGroupContentsView: View {
         .listStyle(.insetGrouped)
         .readingScrollContentBackgroundHidden()
         .background(ReadingTheme.groupedCanvas)
-        .navigationTitle(group)
+        .navigationTitle(isSelecting ? "已选 \(selectedSourceIDs.count) 个" : group)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !summaries.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isSelecting ? "完成" : "选择") {
+                        isSelecting.toggle()
+                        if !isSelecting { selectedSourceIDs.removeAll() }
+                    }
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if isSelecting {
+                HStack(spacing: 12) {
+                    Button(selectedSourceIDs.count == summaries.count && !summaries.isEmpty ? "取消全选" : "全选") {
+                        if selectedSourceIDs.count == summaries.count { selectedSourceIDs.removeAll() }
+                        else { selectedSourceIDs = Set(summaries.map(\.id)) }
+                    }
+                    Spacer()
+                    Button("移出分组") {
+                        let ids = selectedSourceIDs
+                        selectedSourceIDs.removeAll()
+                        Task { await library.removeGroup(group, from: ids) }
+                    }
+                    .disabled(selectedSourceIDs.isEmpty)
+                    Button("启用") {
+                        Task { await library.setEnabled(true, for: selectedSourceIDs) }
+                    }
+                    .disabled(selectedSourceIDs.isEmpty)
+                    Button("停用") {
+                        Task { await library.setEnabled(false, for: selectedSourceIDs) }
+                    }
+                    .disabled(selectedSourceIDs.isEmpty)
+                    Button("删除", role: .destructive) { confirmsBatchDelete = true }
+                        .disabled(selectedSourceIDs.isEmpty)
+                }
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 18).padding(.vertical, 12)
+                .background(.ultraThinMaterial)
+            }
+        }
+        .alert("删除所选书源？", isPresented: $confirmsBatchDelete) {
+            Button("删除 \(selectedSourceIDs.count) 个", role: .destructive) {
+                let ids = selectedSourceIDs
+                selectedSourceIDs.removeAll()
+                Task { await library.remove(sourceIDs: ids) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将删除已选的 \(selectedSourceIDs.count) 个书源，无法撤销。")
+        }
         .readingNavigationDestination(isPresented: Binding(
             get: { activeDetailSource != nil },
             set: { if !$0 { activeDetailSource = nil } }
