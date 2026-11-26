@@ -595,8 +595,8 @@ private struct SourceGroupContentsView: View {
         .navigationTitle(isSelecting ? "已选 \(selectedSourceIDs.count) 个" : group)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if !summaries.isEmpty {
-                ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .topBarTrailing) {
+                if !summaries.isEmpty || isSelecting {
                     Button(isSelecting ? "完成" : "选择") {
                         isSelecting.toggle()
                         if !isSelecting { selectedSourceIDs.removeAll() }
